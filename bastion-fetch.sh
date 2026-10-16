@@ -130,26 +130,68 @@ fetch_norm() { # fetch_norm <url> <download-path> <final.tar.gz>
   if to_targz "$2" "$3"; then rm -f "$2"; fi
 }
 
-# RHEL 8.10 is glibc 2.28, so it runs manylinux_2_28 wheels as well as the
-# older manylinux2014 (= 2.17) ones. Asking for 2014 ALONE makes pip reject
-# every 2_28-only wheel -- pillow among them -- and then silently BACKTRACK
-# the whole resolution to a release old enough to predate that dependency.
-# That is how this produced aider 0.28 (April 2024) instead of 0.86. Offer
-# both tags.
-PIP_PLATFORMS=(--platform manylinux_2_28_x86_64 --platform manylinux2014_x86_64)
+# Wheel downloading is the single most failure-prone step here, so it is
+# explicit about which mode it is in.
+#
+# Native mode: when this host already matches the target (linux x86_64 and
+# python 3.11), a plain download produces exactly the right wheels and needs
+# no --platform juggling at all. Always preferred.
+#
+# Cross mode: BOTH manylinux tags must be offered. Asking for manylinux2014
+# alone rejects the 2_28-only wheels (pillow) and makes pip BACKTRACK the
+# whole resolution to a release old enough to predate them -- that is how
+# this shipped aider 0.28 (April 2024) instead of 0.86. Asking for 2_28 alone
+# fails outright, because pip does not expand manylinux tags downward. And
+# repeating --platform requires pip >= 22, so that is checked rather than
+# assumed: an older pip honours only one of them and silently reintroduces
+# the downgrade.
+PY_BIN="${PY_BIN:-}"
+pick_python() {
+  local c
+  for c in python3.11 python3; do
+    command -v "$c" >/dev/null 2>&1 && { PY_BIN="$c"; return 0; }
+  done
+  die_pip "no python3 on this host"
+}
+die_pip() { printf '\033[31mxx %s\033[0m\n' "$*" >&2; exit 3; }
 
-# Prefer wheels tagged for the TARGET (cp311/manylinux), not this host.
+host_matches_target() {
+  [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] \
+    && "$PY_BIN" -c 'import sys; sys.exit(0 if sys.version_info[:2]==(3,11) else 1)' 2>/dev/null
+}
+
+pip_supports_multiplatform() {
+  local v
+  v="$("$PY_BIN" -m pip --version 2>/dev/null | awk '{print $2}' | cut -d. -f1)"
+  [ -n "$v" ] && [ "$v" -ge 22 ]
+}
+
 pipdl() { # pipdl <destdir> <pkgs...>
   local dest="$1"; shift
-  # stderr is NOT discarded: hiding it is what made the silent downgrade
-  # above invisible for weeks.
-  python3 -m pip download -q -d "$dest" \
-      --only-binary=:all: "${PIP_PLATFORMS[@]}" \
-      --python-version 3.11 --implementation cp --abi cp311 "$@" \
-    && { echo "   ok (cp311/manylinux wheels)"; return 0; }
-  warn "strict cp311 download failed for: $*  - retrying natively"
-  warn "  (if this bastion is not py3.11/x86_64 linux, those may not install)"
-  python3 -m pip download -q -d "$dest" "$@"
+  [ -n "$PY_BIN" ] || pick_python
+  # Start clean. A dir left over from a failed resolution holds several
+  # candidate versions and an incomplete dependency set, which later fails on
+  # the target as "cannot install aider-chat==0.86.0 and ==0.86.1".
+  rm -rf "$dest"; mkdir -p "$dest"
+
+  if host_matches_target; then
+    echo "   native mode ($PY_BIN, linux x86_64 == target)"
+    "$PY_BIN" -m pip download -q -d "$dest" --only-binary=:all: "$@" && return 0
+    warn "native wheel download failed for: $*"
+    return 1
+  fi
+
+  echo "   cross mode (this host is not linux/x86_64/py3.11)"
+  pip_supports_multiplatform || die_pip "pip $("$PY_BIN" -m pip --version | awk '{print $2}') is too old for repeated --platform (need >= 22).
+   Fix one of these, then re-run:
+     $PY_BIN -m pip install --upgrade pip
+   or run this script on a linux x86_64 host with python 3.11, where no
+   --platform flags are needed at all."
+  "$PY_BIN" -m pip download -q -d "$dest" --only-binary=:all: \
+      --platform manylinux_2_28_x86_64 --platform manylinux2014_x86_64 \
+      --python-version 3.11 --implementation cp --abi cp311 "$@" && return 0
+  warn "cross wheel download failed for: $*"
+  return 1
 }
 
 # ------------------------------------------------------------- emacs --------

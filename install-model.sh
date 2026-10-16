@@ -291,8 +291,20 @@ install_aider() {
   command -v python3.11 >/dev/null || die "no python3.11"
   [ -d "$venv" ] || python3.11 -m venv "$venv" \
     || die "venv failed (python3.11 may lack ensurepip)"
-  "$venv/bin/pip" install -q --no-index --find-links "$HERE/wheels-aider" aider-chat \
-    || { warn "aider install failed - wheel set may be incomplete for this platform"; return 0; }
+  # Install the WHEEL FILE, not the bare name: that pins the version, so pip
+  # cannot walk backwards through 0.86.1, 0.86.0 ... when one dependency is
+  # missing and then report it as a version conflict.
+  local whl
+  whl="$(ls "$HERE"/wheels-aider/aider_chat-*.whl 2>/dev/null | sort -V | tail -1)"
+  if [ -z "$whl" ]; then
+    warn "no aider wheel in $HERE/wheels-aider - re-run './bastion-fetch.sh model'"
+    return 0
+  fi
+  echo "   installing $(basename "$whl")"
+  "$venv/bin/pip" install -q --no-index --find-links "$HERE/wheels-aider" "$whl" \
+    || { warn "aider install failed. The wheelhouse is probably incomplete:
+     on the fetch host, rm -rf airgap/model/wheels-aider and re-run
+     ./bastion-fetch.sh model  (it now clears the dir itself)"; return 0; }
   ln -sfn "$venv/bin/aider" "$PREFIX/bin/aider"
   echo "   $("$PREFIX/bin/aider" --version 2>/dev/null || echo installed)"
 
