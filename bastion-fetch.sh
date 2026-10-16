@@ -26,6 +26,7 @@ EMACS_VER=30.1                 # match the Mac exactly -> identical behavior
 TREE_SITTER_VER=0.25.3         # any 0.25.x is fine (Emacs 30 takes ABI 13-15)
 GO_VER=1.27.2                  # gopls@latest needs >= 1.27 to build; keep
                                # the shipped toolchain >= that
+DOTFILES_REPO="${DOTFILES_REPO:-https://github.com/emmettlsc/dotfiles.git}"
 OLLAMA_VER=v0.40.5             # asset NAMES and FORMAT change between releases
 CLANGD_VER=23.1.0              # needs only GLIBC_2.18; static libstdc++
 SHELLCHECK_VER=v0.11.0         # fully static
@@ -196,10 +197,24 @@ fetch_emacs() {
   mkdir -p "$D/wheels-lsp"
   pipdl "$D/wheels-lsp" python-lsp-server ruff || warn "python LSP wheels incomplete"
 
-  # Carry the editor config across if it's sitting next to this script.
-  if [ -d "$(dirname "$0")/dotfiles" ]; then
-    say "bundling dotfiles/"
-    cp -R "$(dirname "$0")/dotfiles" "$D/dotfiles"
+  # Sync the editor config rather than trusting whatever clone is lying
+  # around: a stale dotfiles/ here is invisible until the target is already
+  # running the old init.el, which is a slow and confusing way to find out.
+  say "dotfiles"
+  local dd="$(dirname "$0")/dotfiles"
+  if [ -d "$dd/.git" ]; then
+    ( cd "$dd" && git pull --ff-only -q ) \
+      && echo "   pulled: $(cd "$dd" && git log --oneline -1)" \
+      || warn "git pull failed in $dd - bundling it as-is"
+  elif [ -n "${DOTFILES_REPO:-}" ]; then
+    git clone -q "$DOTFILES_REPO" "$dd" && echo "   cloned $DOTFILES_REPO"
+  fi
+  if [ -d "$dd" ]; then
+    rm -rf "$D/dotfiles"; cp -R "$dd" "$D/dotfiles"; rm -rf "$D/dotfiles/.git"
+    echo "   bundled $(ls "$D/dotfiles" | tr '\n' ' ')"
+  else
+    warn "no dotfiles/ next to this script and DOTFILES_REPO unset:"
+    warn "  the target will get no init.el"
   fi
 
   # The target-side installer travels inside the bundle.

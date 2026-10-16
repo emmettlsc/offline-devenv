@@ -1,0 +1,4 @@
+# the dotfiles clone bastion-fetch.sh syncs next to itself
+dotfiles/
+# fetched artifacts and bundles (tens of GB with weights)
+airgap/

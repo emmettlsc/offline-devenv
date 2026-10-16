@@ -23,6 +23,12 @@ CC="${CC:-cc}"
 CXX="${CXX:-c++}"
 mkdir -p "$DEST"
 
+# tree-sitter-yaml ships a C++ external scanner, so that one grammar needs a
+# C++ compiler while the other nine do not. Say so up front instead of
+# surfacing it as one mysterious failure at the end.
+command -v "$CXX" >/dev/null 2>&1 \
+  || echo "!! no '$CXX' on PATH: grammars with a C++ scanner (yaml) will fail" >&2
+
 built=() failed=()
 for tgz in "$SRCDIR"/*.tar.gz; do
   base="$(basename "$tgz")"

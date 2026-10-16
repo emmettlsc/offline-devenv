@@ -33,6 +33,20 @@ build_err() { # build_err <log>
   echo "    JOBS=1 $0 emacs"
 }
 
+# Append a guarded source line to an rc file. Additive and idempotent -- it
+# never replaces an rc file. An earlier version of this script deployed the
+# whole dotfiles set here and clobbered a work box's site prompt; losing that
+# is not a trade worth making to put an editor on PATH.
+add_rc() { # add_rc <rcfile> <needle> <line>
+  if [ ! -e "$1" ]; then echo "   $(basename "$1") does not exist - skipped"; return 0; fi
+  if grep -qF "$2" "$1" 2>/dev/null; then
+    echo "   $(basename "$1") already sources $(basename "$2")"
+  else
+    printf '\n# locally built toolchain (added by install-target.sh)\n%s\n' "$3" >> "$1"
+    echo "   appended to $1"
+  fi
+}
+
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m!! %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31mxx %s\033[0m\n' "$*" >&2; exit 1; }
@@ -239,8 +253,17 @@ setenv GOPROXY off
 rehash
 ENV
   echo "   wrote $PREFIX/env.sh and $PREFIX/env.csh"
-  echo "   bash/zsh:  . $PREFIX/env.sh"
-  echo "   tcsh/csh:  source $PREFIX/env.csh   (it rehashes for you)"
+  if [ "${NO_SHELL_RC:-0}" != 1 ]; then
+    add_rc "$HOME/.cshrc"  "$PREFIX/env.csh" \
+           "if (-f $PREFIX/env.csh) source $PREFIX/env.csh"
+    add_rc "$HOME/.bashrc" "$PREFIX/env.sh" \
+           "[ -f $PREFIX/env.sh ] && . $PREFIX/env.sh"
+  else
+    echo "   NO_SHELL_RC=1: rc files untouched"
+  fi
+  echo
+  echo "   THIS shell still has the old PATH. In tcsh:"
+  echo "       source $PREFIX/env.csh      # ends with rehash"
 }
 
 # ----------------------------------------------------------------- verify ---
