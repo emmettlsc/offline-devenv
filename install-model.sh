@@ -81,61 +81,75 @@ preflight() {
 }
 
 # -------------------------------------------------------------- ollama ------
-# bin/ollama is the FIRST entry in the archive and lib/ollama/llama-quantize
-# is among the LAST, after ~685MB of CUDA libraries. A truncated transfer or a
-# full disk therefore leaves a server that starts fine and an import path that
-# fails much later with "llama-quantize unavailable binary not found".
-ollama_tree_ok() { # ollama_tree_ok [quiet]
-  local f rc=0
-  for f in bin/ollama lib/ollama/llama-quantize lib/ollama/libllama-quantize-impl.so \
-           lib/ollama/libllama-common.so.0; do
+# Verify the extracted tree against the ARCHIVE'S OWN manifest rather than a
+# hand-written list of files. bin/ollama is the first entry and the llama-*
+# helpers are among the last, after ~685MB of CUDA libraries, so a truncated
+# transfer or a full disk leaves a server that starts and an install that is
+# missing exactly the pieces needed to run or import a model. A hardcoded
+# list is also a list someone forgets to update: this missed llama-server.
+ollama_tree_complete() { # ollama_tree_complete <archive> [quiet]
+  local tgz="$1" quiet="${2:-}" f missing=0 total=0
+  while IFS= read -r f; do
+    case "$f" in */) continue ;; esac
+    total=$((total+1))
     if [ ! -e "$PREFIX/$f" ]; then
-      [ "${1:-}" = quiet ] || warn "missing from the ollama install: $f"
-      rc=1
+      missing=$((missing+1))
+      [ "$quiet" = quiet ] || warn "missing: $f"
     fi
-  done
-  return $rc
+  done < <(tar -tzf "$tgz" 2>/dev/null)
+  [ "$total" -gt 0 ] || return 1
+  if [ "$missing" -gt 0 ]; then
+    [ "$quiet" = quiet ] || warn "$missing of $total files missing from $PREFIX"
+    return 1
+  fi
+  [ "$quiet" = quiet ] || echo "   all $total files present"
+  return 0
 }
 
 install_ollama() {
   say "ollama"
   local tgz="$HERE/ollama-linux-amd64.tar.gz" zst="$HERE/ollama-linux-amd64.tar.zst"
 
-  # Validate the whole gzip stream before trusting it. This is the cheap,
-  # decisive test for the truncation described above.
-  if [ -s "$tgz" ]; then
-    if ! gzip -t "$tgz" 2>/dev/null; then
-      die "archive is truncated or corrupt: $tgz
+  if [ ! -s "$tgz" ] && [ -s "$zst" ]; then
+    command -v zstd >/dev/null \
+      || die "only .tar.zst present and no zstd here (RHEL 8 tar 1.30 cannot read it).
+   Re-run the fetch on a host with zstd, or install the zstd RPM."
+    say "converting .tar.zst -> .tar.gz once, so tar 1.30 can read it"
+    zstd -dc "$zst" | gzip -1 > "$tgz.part" && mv "$tgz.part" "$tgz"
+  fi
+  [ -s "$tgz" ] || die "no ollama archive in $HERE"
+
+  # Validate the whole gzip stream before trusting its manifest.
+  gzip -t "$tgz" 2>/dev/null || die "archive is truncated or corrupt: $tgz
    On the fetch host:
      rm -f airgap/model/ollama-linux-amd64.tar.gz && ./bastion-fetch.sh model
    then re-sync it here."
-    fi
-    echo "   archive integrity OK ($(du -h "$tgz" | cut -f1))"
-  fi
+  echo "   archive integrity OK ($(du -h "$tgz" | cut -f1))"
 
-  if ollama_tree_ok quiet; then
+  if ollama_tree_complete "$tgz" quiet; then
     echo "   already installed: $("$OLLAMA" --version 2>&1 | tail -1)"
     return 0
   fi
 
   echo "   extracting into $PREFIX"
   mkdir -p "$PREFIX"
-  if [ -s "$tgz" ]; then
-    tar -C "$PREFIX" -xzf "$tgz" || die "extraction failed (disk full?)"
-  elif [ -s "$zst" ]; then
-    command -v zstd >/dev/null \
-      || die "only .tar.zst present and no zstd here (RHEL 8 tar 1.30 cannot read it).
-   Re-run the fetch on a host with zstd, or install the zstd RPM."
-    zstd -dc "$zst" | tar -C "$PREFIX" -x || die "extraction failed (disk full?)"
-  else
-    die "no ollama archive in $HERE"
-  fi
-  # tar preserves modes, but a hand-copied tree may not.
+  tar -C "$PREFIX" -xzf "$tgz" || die "extraction failed (disk full?)"
   chmod +x "$PREFIX"/bin/ollama "$PREFIX"/lib/ollama/llama-* 2>/dev/null || true
 
-  ollama_tree_ok || die "ollama install still incomplete after extraction (see above).
-   Check free space on $PREFIX and re-run."
+  ollama_tree_complete "$tgz" || die "install still incomplete after extraction.
+   Check free space on $PREFIX (the tree needs ~1.3GB) and re-run."
   echo "   installed: $("$OLLAMA" --version 2>&1 | tail -1)"
+
+  # The runtime that actually serves inference, and the GPU backend for it.
+  local f
+  for f in lib/ollama/llama-server lib/ollama/libllama-server-impl.so; do
+    [ -e "$PREFIX/$f" ] && echo "   runtime: $f" || warn "runtime MISSING: $f"
+  done
+  if ls -d "$PREFIX"/lib/ollama/cuda_v* >/dev/null 2>&1; then
+    echo "   cuda backends: $(ls -d "$PREFIX"/lib/ollama/cuda_v* | xargs -n1 basename | tr '\n' ' ')"
+  else
+    warn "no cuda_v* backend present - ollama will run on CPU only"
+  fi
 }
 
 write_env() {
