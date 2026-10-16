@@ -108,7 +108,21 @@ export OLLAMA_KV_CACHE_TYPE=q8_0
 export OLLAMA_KEEP_ALIVE=30m
 # aider talks to ollama over this; it is NOT the same var as OLLAMA_HOST.
 export OLLAMA_API_BASE="http://$OLLAMA_HOST"
+export TIKTOKEN_CACHE_DIR="$PREFIX/tiktoken-cache"
+export LITELLM_LOCAL_MODEL_COST_MAP=True
 ENV
+  # Seed tiktoken's cache so aider can count tokens without reaching the
+  # network, and force litellm to use its bundled model-cost map instead of
+  # fetching one (it otherwise retries in a background thread before falling
+  # back, so this costs startup time too).
+  if [ -d "$HERE/tiktoken-cache" ]; then
+    rm -rf "$PREFIX/tiktoken-cache"
+    cp -R "$HERE/tiktoken-cache" "$PREFIX/tiktoken-cache"
+    echo "   tiktoken cache -> $PREFIX/tiktoken-cache ($(ls "$PREFIX/tiktoken-cache" | wc -l | tr -d ' ') encodings)"
+  else
+    warn "no tiktoken-cache/ in the bundle: aider will try to download BPE vocab"
+    warn "  re-run './bastion-fetch.sh model' on the fetch host"
+  fi
   cat > "$PREFIX/ollama-env.csh" <<ENV
 # source this from ~/.cshrc (after env.csh)
 setenv PATH "$PREFIX/bin:\${PATH}"
@@ -118,6 +132,8 @@ setenv OLLAMA_FLASH_ATTENTION 1
 setenv OLLAMA_KV_CACHE_TYPE q8_0
 setenv OLLAMA_KEEP_ALIVE 30m
 setenv OLLAMA_API_BASE "http://$OLLAMA_HOST"
+setenv TIKTOKEN_CACHE_DIR "$PREFIX/tiktoken-cache"
+setenv LITELLM_LOCAL_MODEL_COST_MAP True
 ENV
   echo "   wrote $PREFIX/ollama-env.sh and $PREFIX/ollama-env.csh"
   if [ "${NO_SHELL_RC:-0}" != 1 ]; then

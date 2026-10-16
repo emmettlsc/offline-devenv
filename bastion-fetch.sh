@@ -50,6 +50,13 @@ GRAMMARS=(
 # a finished blob store and never runs the GGUF import path. Preferred: that
 # path needs llama-quantize and can need "compatibility patches" on the
 # target, and it copies every GGUF a second time into the blob store.
+# aider counts tokens with tiktoken, which downloads its BPE vocab from
+# openaipublic.blob.core.windows.net on first use -- fatal on an air-gapped
+# box. tiktoken keys each cached file by sha1(url), verified against tiktoken
+# itself, so the cache can be seeded with curl and needs no python here.
+TIKTOKEN_BASE_URL="https://openaipublic.blob.core.windows.net/encodings"
+TIKTOKEN_ENCODINGS=(cl100k_base o200k_base p50k_base r50k_base)
+
 REGISTRY_MODELS=(
   "qwen3-coder:30b"
 # "deepseek-coder-v2:16b"
@@ -238,6 +245,23 @@ fetch_emacs() {
 }
 
 # -------------------------------------------------------------- model -------
+sha1_of() { # sha1_of <string>  (no trailing newline: matches hashlib.sha1)
+  if command -v sha1sum >/dev/null 2>&1; then printf '%s' "$1" | sha1sum | awk '{print $1}'
+  else printf '%s' "$1" | shasum | awk '{print $1}'; fi
+}
+
+fetch_tiktoken() {
+  local cache="$OUT/model/tiktoken-cache" e url key
+  say "tiktoken BPE cache"
+  mkdir -p "$cache"
+  for e in "${TIKTOKEN_ENCODINGS[@]}"; do
+    url="$TIKTOKEN_BASE_URL/$e.tiktoken"
+    key="$(sha1_of "$url")"
+    if [ -s "$cache/$key" ]; then echo "   have $e"; continue; fi
+    get "$url" "$cache/$key" && echo "   $e -> $key"
+  done
+}
+
 fetch_model_common() {
   local D="$OUT/model"
 
@@ -248,6 +272,8 @@ fetch_model_common() {
   say "aider wheels"
   mkdir -p "$D/wheels-aider"
   pipdl "$D/wheels-aider" aider-chat || warn "aider wheels incomplete"
+
+  fetch_tiktoken
 
   # The target-side installer rides along inside the bundle it installs.
   [ -f "$(dirname "$0")/install-model.sh" ] && cp "$(dirname "$0")/install-model.sh" "$D/"
