@@ -24,7 +24,8 @@ mkdir -p "$OUT"/{emacs,model}
 # manifest of what it actually got at the end.
 EMACS_VER=30.1                 # match the Mac exactly -> identical behavior
 TREE_SITTER_VER=0.25.3         # any 0.25.x is fine (Emacs 30 takes ABI 13-15)
-GO_VER=1.26.0
+GO_VER=1.27.2                  # gopls@latest needs >= 1.27 to build; keep
+                               # the shipped toolchain >= that
 OLLAMA_VER=v0.40.5             # asset NAMES and FORMAT change between releases
 CLANGD_VER=23.1.0              # needs only GLIBC_2.18; static libstdc++
 SHELLCHECK_VER=v0.11.0         # fully static
@@ -86,6 +87,28 @@ to_targz() { # to_targz <archive> <out.tar.gz>
   $dec "$src" | gzip -1 > "$dst.part" && mv "$dst.part" "$dst"
 }
 
+# Fetch then normalize, skipping the download entirely when the normalized
+# artifact is already present. Without this a re-run re-downloads the original
+# every time, because the first run deletes it after repacking -- 52MB for
+# emacs, 1.4GB for ollama.
+# Delete artifacts left over from a previous pin. The target side discovers
+# archives by glob, and an old version can win it (go1.26.0 sorts before
+# go1.27.2), which would quietly ship the wrong toolchain.
+prune_stale() { # prune_stale <dir> <glob> <keep-basename>
+  local f
+  for f in "$1"/$2; do
+    [ -e "$f" ] || continue
+    [ "$(basename "$f")" = "$3" ] && continue
+    echo "   pruned $(basename "$f")"; rm -f "$f"
+  done
+}
+
+fetch_norm() { # fetch_norm <url> <download-path> <final.tar.gz>
+  if [ -s "$3" ]; then echo "   have $(basename "$3")"; return 0; fi
+  get "$1" "$2"
+  if to_targz "$2" "$3"; then rm -f "$2"; fi
+}
+
 # Prefer wheels tagged for the TARGET (cp311/manylinux), not this host.
 pipdl() { # pipdl <destdir> <pkgs...>
   local dest="$1"; shift
@@ -103,9 +126,9 @@ fetch_emacs() {
   local D="$OUT/emacs"
 
   say "emacs $EMACS_VER source"
-  get "https://ftp.gnu.org/gnu/emacs/emacs-$EMACS_VER.tar.xz" "$D/emacs-$EMACS_VER.tar.xz"
-  to_targz "$D/emacs-$EMACS_VER.tar.xz" "$D/emacs-$EMACS_VER.tar.gz" \
-    && rm -f "$D/emacs-$EMACS_VER.tar.xz"
+  fetch_norm "https://ftp.gnu.org/gnu/emacs/emacs-$EMACS_VER.tar.xz" \
+             "$D/emacs-$EMACS_VER.tar.xz" "$D/emacs-$EMACS_VER.tar.gz"
+  prune_stale "$D" 'emacs-*.tar.*' "emacs-$EMACS_VER.tar.gz"
 
   say "libtree-sitter $TREE_SITTER_VER source (C library; no Rust needed)"
   get "https://github.com/tree-sitter/tree-sitter/archive/refs/tags/v$TREE_SITTER_VER.tar.gz" \
@@ -120,27 +143,50 @@ fetch_emacs() {
 
   say "go toolchain $GO_VER (gopls shells out to 'go list' - required on target)"
   get "https://go.dev/dl/go$GO_VER.linux-amd64.tar.gz" "$D/go$GO_VER.linux-amd64.tar.gz"
+  prune_stale "$D" 'go*.linux-amd64.tar.gz' "go$GO_VER.linux-amd64.tar.gz"
 
   say "gopls + dlv (static linux/amd64 - built here, nothing to build there)"
   if [ -x "$D/bin/gopls" ] && [ -x "$D/bin/dlv" ]; then
     echo "   have gopls/dlv"
   else
-    local GR="$OUT/.goroot"
+    local GR="$OUT/.goroot" GP="$OUT/.gopath"
     [ -x "$GR/go/bin/go" ] || { mkdir -p "$GR"; tar -C "$GR" -xzf "$D/go$GO_VER.linux-amd64.tar.gz"; }
-    mkdir -p "$D/bin"
-    env GOROOT="$GR/go" PATH="$GR/go/bin:$PATH" GOBIN="$D/bin" \
-        GOFLAGS=-trimpath GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-        "$GR/go/bin/go" install \
-          golang.org/x/tools/gopls@latest \
-          github.com/go-delve/delve/cmd/dlv@latest
-    echo "   built: $(ls "$D/bin")"
+    mkdir -p "$D/bin" "$GP"
+    # ONE package per invocation: `go install pkg@version' requires every
+    # argument to come from the same module, so gopls and dlv cannot share a
+    # command line ("All packages must be provided by the same module").
+    #
+    # GOBIN is deliberately unset: go refuses it outright when the build is a
+    # cross-compile ("cannot install cross-compiled binaries when GOBIN is
+    # set"), which is exactly what happens if this is ever run from a mac
+    # instead of a linux host. Collect from GOPATH/bin afterwards instead --
+    # a cross-build lands in a <goos>_<goarch>/ subdirectory there, a native
+    # one directly in bin/.
+    #
+    # GOROOT stays unset too: when a tool wants a newer toolchain (gopls now
+    # needs >= 1.27) go re-execs into it, and a GOROOT pinned at the bundled
+    # version contradicts that. GOTOOLCHAIN=auto is explicit so a host with
+    # GOTOOLCHAIN=local in its environment still works.
+    local pkg b src
+    for pkg in golang.org/x/tools/gopls@latest \
+               github.com/go-delve/delve/cmd/dlv@latest; do
+      echo "   building ${pkg%@*}"
+      env PATH="$GR/go/bin:$PATH" GOPATH="$GP" GOTOOLCHAIN=auto \
+          GOFLAGS=-trimpath GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+          "$GR/go/bin/go" install "$pkg" \
+        || warn "failed to build ${pkg%@*}"
+    done
+    for b in gopls dlv; do
+      src="$(find "$GP/bin" -type f -name "$b" 2>/dev/null | head -1)"
+      if [ -n "$src" ]; then install -m755 "$src" "$D/bin/$b"; echo "   ok $b"
+      else warn "$b was not produced"; fi
+    done
   fi
 
   say "clangd $CLANGD_VER (C/C++/CUDA LSP; runs on glibc 2.28, no RPM needed)"
-  get "https://github.com/clangd/clangd/releases/download/$CLANGD_VER/clangd-linux-$CLANGD_VER.zip" \
-      "$D/clangd-linux-$CLANGD_VER.zip"
-  to_targz "$D/clangd-linux-$CLANGD_VER.zip" "$D/clangd-$CLANGD_VER.tar.gz" \
-    && rm -f "$D/clangd-linux-$CLANGD_VER.zip"
+  fetch_norm "https://github.com/clangd/clangd/releases/download/$CLANGD_VER/clangd-linux-$CLANGD_VER.zip" \
+             "$D/clangd-linux-$CLANGD_VER.zip" "$D/clangd-$CLANGD_VER.tar.gz"
+  prune_stale "$D" 'clangd-*' "clangd-$CLANGD_VER.tar.gz"
 
   say "shellcheck $SHELLCHECK_VER (static; backs flymake in bash buffers)"
   get "https://github.com/koalaman/shellcheck/releases/download/$SHELLCHECK_VER/shellcheck-$SHELLCHECK_VER.linux.x86_64.tar.gz" \
@@ -167,10 +213,8 @@ fetch_model() {
   local D="$OUT/model"
 
   say "ollama $OLLAMA_VER (prebuilt, CUDA bundled, runs on glibc 2.28)"
-  get "https://github.com/ollama/ollama/releases/download/$OLLAMA_VER/ollama-linux-amd64.tar.zst" \
-      "$D/ollama-linux-amd64.tar.zst"
-  to_targz "$D/ollama-linux-amd64.tar.zst" "$D/ollama-linux-amd64.tar.gz" \
-    && rm -f "$D/ollama-linux-amd64.tar.zst"
+  fetch_norm "https://github.com/ollama/ollama/releases/download/$OLLAMA_VER/ollama-linux-amd64.tar.zst" \
+             "$D/ollama-linux-amd64.tar.zst" "$D/ollama-linux-amd64.tar.gz"
 
   say "aider wheels"
   mkdir -p "$D/wheels-aider"
