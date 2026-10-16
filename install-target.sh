@@ -224,6 +224,17 @@ install_tools() {
     fi
     ln -sfn "$PREFIX/dotfiles/emacs/init.el" "$HOME/.emacs.d/init.el"
     echo "   linked ~/.emacs.d/init.el -> $PREFIX/dotfiles/emacs/init.el"
+    # Emacs loads the FIRST of ~/.emacs.el, ~/.emacs, ~/.emacs.d/init.el and
+    # ignores the rest. On an account that has used Emacs for years ~/.emacs
+    # usually exists, and it silently shadows the config we just linked --
+    # Emacs then looks completely unchanged for a reason nothing reports.
+    local shadow
+    for shadow in "$HOME/.emacs.el" "$HOME/.emacs"; do
+      [ -e "$shadow" ] || continue
+      warn "$shadow SHADOWS ~/.emacs.d/init.el -- Emacs ignores what we linked."
+      warn "  move it aside:   mv $shadow $shadow.pre30"
+      warn "  or load ours from it:   (load \"~/.emacs.d/init.el\")"
+    done
     echo "   shell configs left alone. To pick up the toolchain, add to ~/.cshrc:"
     echo "       if (-f \$HOME/opt/env.csh) source \$HOME/opt/env.csh"
   fi
@@ -294,7 +305,27 @@ verify() {
     [ -x "$PREFIX/bin/$b" ] && echo OK || echo MISSING
   done
   echo
-  echo "next:  . $PREFIX/env.sh && emacs"
+  echo "effective init file (Emacs loads the FIRST that exists):"
+  local f eff=""
+  for f in "$HOME/.emacs.el" "$HOME/.emacs" "$HOME/.emacs.d/init.el"; do
+    [ -e "$f" ] || continue
+    if [ -z "$eff" ]; then eff="$f"; echo "  -> $f"
+    else                   echo "     $f   (SHADOWED - ignored)"; fi
+  done
+  [ -n "$eff" ] || echo "  (none found)"
+  if [ -n "$eff" ]; then
+    # `emacs --batch' does NOT load the init file, so this has to pass it
+    # explicitly -- otherwise the check reports on the binary, not the config.
+    echo "config as actually loaded:"
+    "$E" --batch -l "$eff" --eval '"'"'(princ (format "  line-numbers=%s tabs=%s tab-width=%s  widget.C -> %s\n"
+         (bound-and-true-p global-display-line-numbers-mode)
+         (default-value (quote indent-tabs-mode))
+         (default-value (quote tab-width))
+         (or (assoc-default "/x/widget.C" auto-mode-alist (function string-match)) "UNROUTED")))'"'"' \
+      2>&1 | tail -2 || warn "the effective init file errored under Emacs 30"
+  fi
+  echo
+  echo "next:  source $PREFIX/env.csh && emacs"
 }
 
 case "${1:-all}" in
