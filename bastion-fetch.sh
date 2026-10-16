@@ -161,6 +161,11 @@ fetch_norm() { # fetch_norm <url> <download-path> <final.tar.gz>
 TARGET_GLIBC=2.28
 TARGET_PY=3.11
 
+# A self-contained CPython 3.11 for when the fetch host has none and you have
+# no root. Extracts and runs as a plain user, bundles pip and OpenSSL, and
+# needs only glibc >= 2.17 (the target has 2.28).
+PY311_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.11.17%2B20261013-x86_64-unknown-linux-gnu-install_only.tar.gz"
+
 PY_BIN="${PY_BIN:-}"
 pick_python() {
   local c v
@@ -169,12 +174,23 @@ pick_python() {
     v="$("$c" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null)"
     [ "$v" = "$TARGET_PY" ] && { PY_BIN="$c"; return 0; }
   done
-  warn "no python $TARGET_PY on this host (found: $(command -v python3 >/dev/null && python3 -V 2>&1 || echo none))."
-  warn "  The wheels must be resolved by a python $TARGET_PY interpreter; asking an"
-  warn "  older one to retarget fails with ResolutionImpossible at every pip version."
-  warn "  On RHEL 8:   sudo dnf install -y python3.11 python3.11-pip"
-  warn "  then re-run. Override with PY_BIN=/path/to/python3.11 if it is elsewhere."
-  return 1
+  # No system 3.11. Rather than failing -- or worse, retargeting from an older
+  # interpreter, which yields ResolutionImpossible at every pip version --
+  # fetch a self-contained one. Needs no root.
+  bootstrap_python
+}
+
+bootstrap_python() {
+  local root="$OUT/.python311" py="$OUT/.python311/python/bin/python3.11"
+  if [ -x "$py" ]; then PY_BIN="$py"; return 0; fi
+  say "no system python $TARGET_PY: fetching a self-contained one (no root needed)"
+  mkdir -p "$root"
+  get "$PY311_URL" "$root/cpython311.tar.gz" || { warn "could not download CPython $TARGET_PY"; return 1; }
+  tar -C "$root" -xzf "$root/cpython311.tar.gz" || { warn "could not unpack CPython"; return 1; }
+  if [ ! -x "$py" ]; then warn "unexpected layout in the CPython tarball"; return 1; fi
+  PY_BIN="$py"
+  echo "   $("$PY_BIN" -V 2>&1)  pip $("$PY_BIN" -m pip --version 2>/dev/null | awk '{print $2}')"
+  echo "   (local to $root -- nothing installed system-wide)"
 }
 
 ver_le() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
