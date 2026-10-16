@@ -180,8 +180,16 @@ stop() {
 
 # -------------------------------------------------------------- models ------
 import_models() {
-  say "import weights"
+  say "models"
   shopt -s nullglob
+  # A blob store rsync'd from a host that ran `ollama pull' is already in its
+  # final form: nothing to import, no llama-quantize, no second copy.
+  local existing
+  existing="$("$OLLAMA" list 2>/dev/null | tail -n +2 | grep -c . || true)"
+  if [ "${existing:-0}" -gt 0 ]; then
+    echo "   $existing model(s) already in the store - no import needed"
+    "$OLLAMA" list 2>/dev/null | sed 's/^/   /'
+  fi
   local mf found=0
   for mf in "$HERE"/modelfiles/*.Modelfile; do
     found=1
@@ -204,11 +212,16 @@ import_models() {
     "$OLLAMA" create "$name" -f "$tmp" || warn "create failed for $name"
     rm -f "$tmp"
   done
-  [ "$found" = 1 ] || warn "no modelfiles/ found - did the model bundle transfer?"
-  "$OLLAMA" list 2>/dev/null | sed 's/^/   /'
-  echo
-  echo "   NOTE: the import copied each GGUF into $OLLAMA_MODELS."
-  echo "   Once 'ollama run' works you can delete $HERE/gguf to reclaim that space."
+  if [ "$found" = 1 ]; then
+    "$OLLAMA" list 2>/dev/null | sed 's/^/   /'
+    echo
+    echo "   NOTE: the import copied each GGUF into $OLLAMA_MODELS."
+    echo "   Once 'ollama run' works, delete $HERE/gguf to reclaim that space."
+  elif [ "${existing:-0}" -eq 0 ]; then
+    warn "no models in the store and no modelfiles/ to import."
+    warn "  on the bastion:  ./bastion-fetch.sh model   (pulls upstream)"
+    warn "  then:            rsync -aP airgap/model/ollama-models/ this-host:$OLLAMA_MODELS/"
+  fi
 }
 
 # --------------------------------------------------------------- aider ------
@@ -224,9 +237,16 @@ install_aider() {
   ln -sfn "$venv/bin/aider" "$PREFIX/bin/aider"
   echo "   $("$PREFIX/bin/aider" --version 2>/dev/null || echo installed)"
 
-  # Pick the first imported model as the default.
-  local default; default="$(basename "$(ls "$HERE"/modelfiles/*.Modelfile 2>/dev/null | head -1)" .Modelfile 2>/dev/null || true)"
-  [ -n "$default" ] || return 0
+  # Name the model as ollama actually reports it (e.g. "qwen3-coder:30b"),
+  # which is what aider needs after the ollama_chat/ prefix. A Modelfile
+  # basename only matches on the GGUF-import path.
+  local default
+  default="$("$OLLAMA" list 2>/dev/null | awk 'NR==2{print $1}')"
+  if [ -z "$default" ]; then
+    default="$(basename "$(ls "$HERE"/modelfiles/*.Modelfile 2>/dev/null | head -1)" .Modelfile 2>/dev/null || true)"
+  fi
+  [ -n "$default" ] || { warn "no model loaded yet - skipping aider config"; return 0; }
+  echo "   default model: $default"
 
   # num_ctx has to be asserted on the aider side too. The Modelfile sets it for
   # the stored model, but litellm sends its own default per request, and the

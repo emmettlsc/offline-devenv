@@ -46,6 +46,17 @@ GRAMMARS=(
   "json|tree-sitter/tree-sitter-json|v0.24.8"
 )
 
+# Models pulled from the ollama registry on THIS host, so the target receives
+# a finished blob store and never runs the GGUF import path. Preferred: that
+# path needs llama-quantize and can need "compatibility patches" on the
+# target, and it copies every GGUF a second time into the blob store.
+REGISTRY_MODELS=(
+  "qwen3-coder:30b"
+# "deepseek-coder-v2:16b"
+# "gpt-oss:20b"
+)
+
+# Used only by the `model-gguf' stage.
 # <local-name>|<hf-repo>|<file-glob>
 # Qwen's own GGUF repo 401s; unsloth's is the usable mirror.
 MODELS=(
@@ -224,7 +235,7 @@ fetch_emacs() {
 }
 
 # -------------------------------------------------------------- model -------
-fetch_model() {
+fetch_model_common() {
   local D="$OUT/model"
 
   say "ollama $OLLAMA_VER (prebuilt, CUDA bundled, runs on glibc 2.28)"
@@ -235,6 +246,53 @@ fetch_model() {
   mkdir -p "$D/wheels-aider"
   pipdl "$D/wheels-aider" aider-chat || warn "aider wheels incomplete"
 
+  # The target-side installer rides along inside the bundle it installs.
+  [ -f "$(dirname "$0")/install-model.sh" ] && cp "$(dirname "$0")/install-model.sh" "$D/"
+  true
+}
+
+# ---------------------------------------------------- registry pull ---------
+# Run a real ollama here and pull upstream, leaving a ready blob store in the
+# bundle. The target then only has to serve it.
+pull_models() {
+  local D="$OUT/model" HOSTDIR="$OUT/.ollama-host" store="$OUT/model/ollama-models"
+  local arc="$D/ollama-linux-amd64.tar.gz"
+  [ -s "$arc" ] || { warn "no ollama archive yet - run the model stage first"; return 1; }
+
+  say "unpacking ollama here (to do the pulling)"
+  if [ ! -x "$HOSTDIR/bin/ollama" ]; then
+    mkdir -p "$HOSTDIR"; tar -C "$HOSTDIR" -xzf "$arc"
+  fi
+  [ -x "$HOSTDIR/bin/ollama" ] || { warn "no bin/ollama inside $arc"; return 1; }
+
+  say "pulling into $store"
+  mkdir -p "$store"
+  # Port 11435, not the default 11434: this must not collide with (or steal
+  # models from) an ollama already running on this host.
+  local hostport="127.0.0.1:11435" log="$OUT/.ollama-host.log" pid i m
+  OLLAMA_MODELS="$store" OLLAMA_HOST="$hostport" "$HOSTDIR/bin/ollama" serve >>"$log" 2>&1 &
+  pid=$!
+  for i in $(seq 1 60); do
+    curl -sf --max-time 2 "http://$hostport/api/version" >/dev/null 2>&1 && break
+    sleep 1
+  done
+  if ! curl -sf --max-time 2 "http://$hostport/api/version" >/dev/null 2>&1; then
+    kill "$pid" 2>/dev/null || true
+    tail -15 "$log" >&2; warn "local ollama did not start (log: $log)"; return 1
+  fi
+  for m in "${REGISTRY_MODELS[@]}"; do
+    echo "   pull $m"
+    OLLAMA_HOST="$hostport" "$HOSTDIR/bin/ollama" pull "$m" || warn "pull failed: $m"
+  done
+  OLLAMA_HOST="$hostport" "$HOSTDIR/bin/ollama" list 2>/dev/null | sed 's/^/   /'
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  du -sh "$store" 2>/dev/null | sed 's/^/   store: /'
+}
+
+# ---------------------------------------------------- gguf (fallback) -------
+fetch_gguf() {
+  local D="$OUT/model"
   say "GGUF weights"
   command -v hf >/dev/null 2>&1 || command -v huggingface-cli >/dev/null 2>&1 || \
     python3 -m pip install -q --user huggingface_hub || warn "could not install huggingface_hub"
@@ -266,18 +324,18 @@ PARAMETER temperature 0.2
 MF
     echo "   modelfile $name -> ${f#"$D/"}"
   done
-
-  # The target-side installer rides along inside the bundle it installs.
-  [ -f "$(dirname "$0")/install-model.sh" ] && cp "$(dirname "$0")/install-model.sh" "$D/"
-  true
 }
 
 # --------------------------------------------------------------- pack -------
 case "$STAGE" in
-  emacs) fetch_emacs ;;
-  model) fetch_model ;;
-  all)   fetch_emacs; fetch_model ;;
-  *)     echo "usage: $0 [all|emacs|model]" >&2; exit 2 ;;
+  emacs)      fetch_emacs ;;
+  model)      fetch_model_common; pull_models ;;
+  model-gguf) fetch_model_common; fetch_gguf ;;
+  all)        fetch_emacs; fetch_model_common; pull_models ;;
+  *) echo "usage: $0 [all|emacs|model|model-gguf]" >&2
+     echo "  model       ollama + aider + registry pull (recommended)" >&2
+     echo "  model-gguf  ollama + aider + HuggingFace GGUF + Modelfiles" >&2
+     exit 2 ;;
 esac
 
 if [ "$STAGE" = emacs ] || [ "$STAGE" = all ]; then
