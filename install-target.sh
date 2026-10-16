@@ -189,9 +189,31 @@ install_tools() {
     fi
   else warn "skipping python LSP (no wheels-lsp/ or no python3.11)"; fi
 
-  # Deploy the editor config if it rode along.
-  if [ -d "$HERE/dotfiles" ] && [ -x "$HERE/dotfiles/install.sh" ]; then
-    say "dotfiles"; ( cd "$HERE/dotfiles" && ./install.sh ) | sed 's/^/   /'
+  # Deploy ONLY the editor config. Running the dotfiles install.sh here would
+  # symlink ~/.cshrc, ~/.bashrc, ~/.tmux.conf and ~/.gitconfig over whatever
+  # the machine already has -- on a work box that means losing the site prompt
+  # and environment, which is not a trade worth making to deploy an editor.
+  if [ -f "$HERE/dotfiles/emacs/init.el" ]; then
+    say "emacs config"
+    # Copy out of the bundle first: it typically lives under /tmp, which gets
+    # cleaned, and a dangling init.el symlink is a confusing way to find out.
+    rm -rf "$PREFIX/dotfiles"; cp -R "$HERE/dotfiles" "$PREFIX/dotfiles"
+    mkdir -p "$HOME/.emacs.d"
+    if [ -e "$HOME/.emacs.d/init.el" ] && [ ! -L "$HOME/.emacs.d/init.el" ]; then
+      mv "$HOME/.emacs.d/init.el" "$HOME/.emacs.d/init.el.bak"
+      echo "   backed up existing init.el -> init.el.bak"
+    fi
+    ln -sfn "$PREFIX/dotfiles/emacs/init.el" "$HOME/.emacs.d/init.el"
+    echo "   linked ~/.emacs.d/init.el -> $PREFIX/dotfiles/emacs/init.el"
+    echo "   shell configs left alone. To pick up the toolchain, add to ~/.cshrc:"
+    echo "       if (-f \$HOME/opt/env.csh) source \$HOME/opt/env.csh"
+  fi
+
+  # The tools stage does not build emacs; say so rather than letting a clean
+  # "finished" imply the editor is ready.
+  if [ ! -x "$PREFIX/bin/emacs" ]; then
+    warn "emacs is NOT built yet (this stage only installs the servers)."
+    warn "  run: $0 emacs"
   fi
 }
 
@@ -211,10 +233,14 @@ ENV
 # source this from ~/.cshrc
 setenv PATH "$PREFIX/bin:$PREFIX/go/bin:\${HOME}/go/bin:\${PATH}"
 setenv GOPROXY off
+# tcsh caches where executables live. A binary newly installed into a
+# directory already on PATH stays invisible until the hash table is rebuilt,
+# which is the usual reason a freshly built emacs still resolves to 26.1.
+rehash
 ENV
   echo "   wrote $PREFIX/env.sh and $PREFIX/env.csh"
   echo "   bash/zsh:  . $PREFIX/env.sh"
-  echo "   tcsh/csh:  source $PREFIX/env.csh"
+  echo "   tcsh/csh:  source $PREFIX/env.csh   (it rehashes for you)"
 }
 
 # ----------------------------------------------------------------- verify ---
