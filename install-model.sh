@@ -32,6 +32,18 @@ export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}"
 
 OLLAMA="$PREFIX/bin/ollama"
 
+# Append a guarded source line to an rc file. Additive and idempotent; never
+# replaces one.
+add_rc() { # add_rc <rcfile> <needle> <line>
+  if [ ! -e "$1" ]; then echo "   $(basename "$1") does not exist - skipped"; return 0; fi
+  if grep -qF "$2" "$1" 2>/dev/null; then
+    echo "   $(basename "$1") already sources $(basename "$2")"
+  else
+    printf '\n# ollama/aider env (added by install-model.sh)\n%s\n' "$3" >> "$1"
+    echo "   appended to $1"
+  fi
+}
+
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m!! %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31mxx %s\033[0m\n' "$*" >&2; exit 1; }
@@ -108,6 +120,12 @@ setenv OLLAMA_KEEP_ALIVE 30m
 setenv OLLAMA_API_BASE "http://$OLLAMA_HOST"
 ENV
   echo "   wrote $PREFIX/ollama-env.sh and $PREFIX/ollama-env.csh"
+  if [ "${NO_SHELL_RC:-0}" != 1 ]; then
+    add_rc "$HOME/.cshrc"  "$PREFIX/ollama-env.csh" \
+           "if (-f $PREFIX/ollama-env.csh) source $PREFIX/ollama-env.csh"
+    add_rc "$HOME/.bashrc" "$PREFIX/ollama-env.sh" \
+           "[ -f $PREFIX/ollama-env.sh ] && . $PREFIX/ollama-env.sh"
+  fi
 
   # Optional user-level unit, for when you'd rather not babysit nohup.
   mkdir -p "$HOME/.config/systemd/user"
