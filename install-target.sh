@@ -18,6 +18,21 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 BUILD="${BUILD:-$HERE/.build}"
 TSDIR="$HOME/.emacs.d/tree-sitter"
 
+# Emacs ends a failed build with a generic "make all failed" advice block, so
+# `tail' shows the epilogue and not the cause -- and under -j the real error is
+# interleaved far above. Pull out the compiler errors directly.
+build_err() { # build_err <log>
+  echo
+  echo "--- first errors in $(basename "$1") ---"
+  grep -nE "error:|undefined reference|No such file or directory|cannot find -l|command not found" "$1" \
+    | grep -vE "advice-on-failure" | head -20 || echo "(no 'error:' lines - see tail below)"
+  echo "--- last 15 lines ---"
+  tail -15 "$1"
+  echo
+  echo "For a clean, serialized error (no -j interleaving):"
+  echo "    JOBS=1 $0 emacs"
+}
+
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m!! %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31mxx %s\033[0m\n' "$*" >&2; exit 1; }
@@ -59,7 +74,7 @@ build_tree_sitter() {
   echo "   building $(basename "$src")"
   # Its Makefile honors PREFIX and installs lib + headers + a .pc file.
   make -C "$src" -j"$JOBS" PREFIX="$PREFIX" >"$BUILD/ts-make.log" 2>&1 \
-    || { tail -20 "$BUILD/ts-make.log"; die "libtree-sitter build failed"; }
+    || { build_err "$BUILD/ts-make.log"; die "libtree-sitter build failed"; }
   make -C "$src" install PREFIX="$PREFIX" >>"$BUILD/ts-make.log" 2>&1
   echo "   installed -> $PREFIX/lib"
 }
@@ -88,11 +103,11 @@ build_emacs() {
     TREE_SITTER_LIBS="-L$PREFIX/lib -ltree-sitter" \
     LDFLAGS="-L$PREFIX/lib -Wl,-rpath,$PREFIX/lib" \
     >"$BUILD/emacs-configure.log" 2>&1 \
-    || { tail -30 "$BUILD/emacs-configure.log"; die "configure failed (log: $BUILD/emacs-configure.log)"; }
+    || { build_err "$BUILD/emacs-configure.log"; die "configure failed"; }
   grep -iE 'tree-sitter' "$BUILD/emacs-configure.log" | tail -2 | sed 's/^/   /' || true
   echo "   compiling with -j$JOBS (a few minutes)"
   make -j"$JOBS" >"$BUILD/emacs-make.log" 2>&1 \
-    || { tail -40 "$BUILD/emacs-make.log"; die "build failed (log: $BUILD/emacs-make.log)"; }
+    || { build_err "$BUILD/emacs-make.log"; die "build failed (log: $BUILD/emacs-make.log)"; }
   make install >/dev/null
   cd "$HERE"
   echo "   $("$PREFIX/bin/emacs" --version | head -1)"
