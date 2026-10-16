@@ -130,67 +130,87 @@ fetch_norm() { # fetch_norm <url> <download-path> <final.tar.gz>
   if to_targz "$2" "$3"; then rm -f "$2"; fi
 }
 
-# Wheel downloading is the single most failure-prone step here, so it is
-# explicit about which mode it is in.
+# Wheel downloading is the most failure-prone step here, so it picks a mode
+# explicitly and says which.
 #
-# Native mode: when this host already matches the target (linux x86_64 and
-# python 3.11), a plain download produces exactly the right wheels and needs
-# no --platform juggling at all. Always preferred.
+# The target is linux x86_64, glibc 2.28, python 3.11. When THIS host is
+# linux x86_64 with glibc no newer than that, its own tag list is already
+# correct for the target -- including manylinux_2_28 and everything below --
+# so no --platform flag is needed, and only the python version has to be
+# retargeted. This is the path that works on an old pip.
 #
-# Cross mode: BOTH manylinux tags must be offered. Asking for manylinux2014
-# alone rejects the 2_28-only wheels (pillow) and makes pip BACKTRACK the
-# whole resolution to a release old enough to predate them -- that is how
-# this shipped aider 0.28 (April 2024) instead of 0.86. Asking for 2_28 alone
-# fails outright, because pip does not expand manylinux tags downward. And
-# repeating --platform requires pip >= 22, so that is checked rather than
-# assumed: an older pip honours only one of them and silently reintroduces
-# the downgrade.
+# --platform is only needed on a foreign host (a mac) or one with newer
+# glibc, and then BOTH manylinux tags must be offered: manylinux2014 alone
+# rejects the 2_28-only wheels (pillow) and makes pip backtrack the whole
+# resolution to a 2024 release, while 2_28 alone fails outright because pip
+# does not expand tags downward. Repeating --platform needs pip >= 22 -- and
+# pip 21 accepts the duplicate flag SILENTLY, honouring only the last, which
+# reintroduces the downgrade with no error. Hence the explicit version gate.
+TARGET_GLIBC=2.28
+TARGET_PY=3.11
+
 PY_BIN="${PY_BIN:-}"
 pick_python() {
   local c
   for c in python3.11 python3; do
     command -v "$c" >/dev/null 2>&1 && { PY_BIN="$c"; return 0; }
   done
-  die_pip "no python3 on this host"
-}
-die_pip() { printf '\033[31mxx %s\033[0m\n' "$*" >&2; exit 3; }
-
-host_matches_target() {
-  [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ] \
-    && "$PY_BIN" -c 'import sys; sys.exit(0 if sys.version_info[:2]==(3,11) else 1)' 2>/dev/null
+  warn "no python3 on this host - cannot fetch wheels"; return 1
 }
 
-pip_supports_multiplatform() {
-  local v
-  v="$("$PY_BIN" -m pip --version 2>/dev/null | awk '{print $2}' | cut -d. -f1)"
-  [ -n "$v" ] && [ "$v" -ge 22 ]
+ver_le() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
+host_glibc() { ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | tail -1; }
+host_py()    { "$PY_BIN" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null; }
+
+# True when this host's own wheel tags are valid for the target.
+host_tags_ok_for_target() {
+  [ "$(uname -s)" = Linux ] || return 1
+  [ "$(uname -m)" = x86_64 ] || return 1
+  local g; g="$(host_glibc)"
+  [ -n "$g" ] || return 1
+  ver_le "$g" "$TARGET_GLIBC"
 }
+
+pip_major() { "$PY_BIN" -m pip --version 2>/dev/null | awk '{print $2}' | cut -d. -f1; }
 
 pipdl() { # pipdl <destdir> <pkgs...>
   local dest="$1"; shift
-  [ -n "$PY_BIN" ] || pick_python
-  # Start clean. A dir left over from a failed resolution holds several
-  # candidate versions and an incomplete dependency set, which later fails on
-  # the target as "cannot install aider-chat==0.86.0 and ==0.86.1".
+  [ -n "$PY_BIN" ] || pick_python || return 1
+  # Start clean: a dir left by a failed resolution holds several candidate
+  # versions and a partial dependency set, which fails later on the target as
+  # "cannot install aider-chat==0.86.0 and ==0.86.1".
   rm -rf "$dest"; mkdir -p "$dest"
 
-  if host_matches_target; then
-    echo "   native mode ($PY_BIN, linux x86_64 == target)"
-    "$PY_BIN" -m pip download -q -d "$dest" --only-binary=:all: "$@" && return 0
-    warn "native wheel download failed for: $*"
+  local py; py="$(host_py)"
+  if host_tags_ok_for_target; then
+    if [ "$py" = "$TARGET_PY" ]; then
+      echo "   native mode (linux x86_64, glibc $(host_glibc), py $py == target)"
+      "$PY_BIN" -m pip download -q -d "$dest" --only-binary=:all: "$@" && return 0
+    else
+      echo "   host-tag mode (linux x86_64, glibc $(host_glibc); retargeting py $py -> $TARGET_PY)"
+      "$PY_BIN" -m pip download -q -d "$dest" --only-binary=:all: \
+          --python-version "$TARGET_PY" --implementation cp --abi "cp${TARGET_PY/./}" "$@" \
+        && return 0
+    fi
+    warn "wheel download failed for: $*"
     return 1
   fi
 
-  echo "   cross mode (this host is not linux/x86_64/py3.11)"
-  pip_supports_multiplatform || die_pip "pip $("$PY_BIN" -m pip --version | awk '{print $2}') is too old for repeated --platform (need >= 22).
-   Fix one of these, then re-run:
-     $PY_BIN -m pip install --upgrade pip
-   or run this script on a linux x86_64 host with python 3.11, where no
-   --platform flags are needed at all."
+  echo "   cross mode (this host is not linux/x86_64/glibc<=$TARGET_GLIBC)"
+  local pm; pm="$(pip_major)"
+  if [ -z "$pm" ] || [ "$pm" -lt 22 ]; then
+    warn "pip $("$PY_BIN" -m pip --version 2>/dev/null | awk '{print $2}') cannot be trusted with repeated"
+    warn "  --platform (needs >= 22; pip 21 honours only the last, silently)."
+    warn "  Either:  $PY_BIN -m pip install --user --upgrade pip"
+    warn "  or run this on a linux x86_64 host with glibc <= $TARGET_GLIBC,"
+    warn "  where no --platform flag is needed at all."
+    return 1
+  fi
   "$PY_BIN" -m pip download -q -d "$dest" --only-binary=:all: \
       --platform manylinux_2_28_x86_64 --platform manylinux2014_x86_64 \
-      --python-version 3.11 --implementation cp --abi cp311 "$@" && return 0
-  warn "cross wheel download failed for: $*"
+      --python-version "$TARGET_PY" --implementation cp --abi "cp${TARGET_PY/./}" "$@" \
+    && return 0
+  warn "wheel download failed for: $*"
   return 1
 }
 
