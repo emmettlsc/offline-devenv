@@ -105,10 +105,23 @@ build_emacs() {
     >"$BUILD/emacs-configure.log" 2>&1 \
     || { build_err "$BUILD/emacs-configure.log"; die "configure failed"; }
   grep -iE 'tree-sitter' "$BUILD/emacs-configure.log" | tail -2 | sed 's/^/   /' || true
+  # `make all' unconditionally builds the `info' target and Emacs 30 dropped
+  # the --without-makeinfo escape hatch. A release tarball ships prebuilt
+  # manuals in info/, so configure merely WARNS when makeinfo is missing --
+  # but if tar left the .texi sources looking newer than those .info files,
+  # make reaches for makeinfo anyway and takes the whole build down. RHEL 8
+  # ships no texinfo by default and we deliberately do not require it, so
+  # mark the shipped manuals current and hand make a no-op makeinfo.
+  local -a mk=()
+  if ! command -v makeinfo >/dev/null 2>&1; then
+    echo "   no makeinfo: keeping the tarball's prebuilt manuals as-is"
+    [ -d info ] && touch info/* 2>/dev/null
+    mk+=(MAKEINFO=true)
+  fi
   echo "   compiling with -j$JOBS (a few minutes)"
-  make -j"$JOBS" >"$BUILD/emacs-make.log" 2>&1 \
+  make -j"$JOBS" ${mk[@]+"${mk[@]}"} >"$BUILD/emacs-make.log" 2>&1 \
     || { build_err "$BUILD/emacs-make.log"; die "build failed (log: $BUILD/emacs-make.log)"; }
-  make install >/dev/null
+  make install ${mk[@]+"${mk[@]}"} >/dev/null
   cd "$HERE"
   echo "   $("$PREFIX/bin/emacs" --version | head -1)"
 }
