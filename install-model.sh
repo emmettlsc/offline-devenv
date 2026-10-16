@@ -73,26 +73,60 @@ preflight() {
 }
 
 # -------------------------------------------------------------- ollama ------
+# bin/ollama is the FIRST entry in the archive and lib/ollama/llama-quantize
+# is among the LAST, after ~685MB of CUDA libraries. A truncated transfer or a
+# full disk therefore leaves a server that starts fine and an import path that
+# fails much later with "llama-quantize unavailable binary not found".
+ollama_tree_ok() { # ollama_tree_ok [quiet]
+  local f rc=0
+  for f in bin/ollama lib/ollama/llama-quantize lib/ollama/libllama-quantize-impl.so \
+           lib/ollama/libllama-common.so.0; do
+    if [ ! -e "$PREFIX/$f" ]; then
+      [ "${1:-}" = quiet ] || warn "missing from the ollama install: $f"
+      rc=1
+    fi
+  done
+  return $rc
+}
+
 install_ollama() {
   say "ollama"
-  if [ -x "$OLLAMA" ]; then
-    echo "   already installed: $("$OLLAMA" --version 2>&1 | tail -1)"; return 0
+  local tgz="$HERE/ollama-linux-amd64.tar.gz" zst="$HERE/ollama-linux-amd64.tar.zst"
+
+  # Validate the whole gzip stream before trusting it. This is the cheap,
+  # decisive test for the truncation described above.
+  if [ -s "$tgz" ]; then
+    if ! gzip -t "$tgz" 2>/dev/null; then
+      die "archive is truncated or corrupt: $tgz
+   On the fetch host:
+     rm -f airgap/model/ollama-linux-amd64.tar.gz && ./bastion-fetch.sh model
+   then re-sync it here."
+    fi
+    echo "   archive integrity OK ($(du -h "$tgz" | cut -f1))"
   fi
-  local tgz
-  tgz="$(ls "$HERE"/ollama-linux-amd64.tar.gz 2>/dev/null || true)"
-  if [ -z "$tgz" ]; then
-    # Bastion had no zstd, so the raw upstream archive came across instead.
-    local zst="$HERE/ollama-linux-amd64.tar.zst"
-    [ -f "$zst" ] || die "no ollama archive in $HERE"
+
+  if ollama_tree_ok quiet; then
+    echo "   already installed: $("$OLLAMA" --version 2>&1 | tail -1)"
+    return 0
+  fi
+
+  echo "   extracting into $PREFIX"
+  mkdir -p "$PREFIX"
+  if [ -s "$tgz" ]; then
+    tar -C "$PREFIX" -xzf "$tgz" || die "extraction failed (disk full?)"
+  elif [ -s "$zst" ]; then
     command -v zstd >/dev/null \
       || die "only .tar.zst present and no zstd here (RHEL 8 tar 1.30 cannot read it).
-   Re-run the bastion fetch on a host with zstd, or install the zstd RPM."
-    say "decompressing .tar.zst"
-    mkdir -p "$PREFIX"; zstd -dc "$zst" | tar -C "$PREFIX" -x
+   Re-run the fetch on a host with zstd, or install the zstd RPM."
+    zstd -dc "$zst" | tar -C "$PREFIX" -x || die "extraction failed (disk full?)"
   else
-    mkdir -p "$PREFIX"; tar -C "$PREFIX" -xzf "$tgz"
+    die "no ollama archive in $HERE"
   fi
-  [ -x "$OLLAMA" ] || die "ollama binary not where expected ($OLLAMA)"
+  # tar preserves modes, but a hand-copied tree may not.
+  chmod +x "$PREFIX"/bin/ollama "$PREFIX"/lib/ollama/llama-* 2>/dev/null || true
+
+  ollama_tree_ok || die "ollama install still incomplete after extraction (see above).
+   Check free space on $PREFIX and re-run."
   echo "   installed: $("$OLLAMA" --version 2>&1 | tail -1)"
 }
 
@@ -205,6 +239,15 @@ import_models() {
   if [ "${existing:-0}" -gt 0 ]; then
     echo "   $existing model(s) already in the store - no import needed"
     "$OLLAMA" list 2>/dev/null | sed 's/^/   /'
+  fi
+  # Refuse the import up front rather than letting ollama fail deep inside it.
+  if [ -d "$HERE/modelfiles" ] && [ ! -x "$PREFIX/lib/ollama/llama-quantize" ]; then
+    warn "GGUF import needs $PREFIX/lib/ollama/llama-quantize, which is absent."
+    warn "  Either re-extract a complete ollama archive (install-model.sh ollama),"
+    warn "  or skip the import entirely by pulling upstream on the fetch host:"
+    warn "      ./bastion-fetch.sh model"
+    warn "      rsync -aP airgap/model/ollama-models/ this-host:$OLLAMA_MODELS/"
+    return 0
   fi
   local mf found=0
   for mf in "$HERE"/modelfiles/*.Modelfile; do
