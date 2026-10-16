@@ -144,7 +144,12 @@ build_emacs() {
 build_grammars() {
   say "tree-sitter grammars"
   [ -x "$HERE/build-grammars.sh" ] || die "build-grammars.sh missing from bundle"
-  "$HERE/build-grammars.sh" "$HERE/grammars" "$TSDIR"
+  # Non-fatal on purpose. build-grammars.sh exits non-zero if ANY grammar
+  # fails, and yaml needs a C++ compiler the others do not -- letting that
+  # abort the run would skip install_tools, write_env and verify, leaving a
+  # box that looks far more broken than it is.
+  "$HERE/build-grammars.sh" "$HERE/grammars" "$TSDIR" \
+    || warn "some grammars failed - continuing (verify will list which)"
 }
 
 # ----------------------------------------------------------------- tools ----
@@ -293,7 +298,10 @@ verify() {
 }
 
 case "${1:-all}" in
-  all)      preflight; build_tree_sitter; build_emacs; build_grammars; install_tools; write_env; verify ;;
+  all)      preflight; build_tree_sitter; build_emacs; build_grammars
+            install_tools || warn "install_tools reported a problem"
+            write_env
+            verify ;;
   emacs)    preflight; build_tree_sitter; build_emacs ;;
   grammars) build_grammars ;;
   tools)    install_tools; write_env ;;
