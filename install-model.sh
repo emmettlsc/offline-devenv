@@ -97,7 +97,17 @@ export OLLAMA_KEEP_ALIVE=30m
 # aider talks to ollama over this; it is NOT the same var as OLLAMA_HOST.
 export OLLAMA_API_BASE="http://$OLLAMA_HOST"
 ENV
-  echo "   wrote $PREFIX/ollama-env.sh"
+  cat > "$PREFIX/ollama-env.csh" <<ENV
+# source this from ~/.cshrc (after env.csh)
+setenv PATH "$PREFIX/bin:\${PATH}"
+setenv OLLAMA_MODELS "$OLLAMA_MODELS"
+setenv OLLAMA_HOST "$OLLAMA_HOST"
+setenv OLLAMA_FLASH_ATTENTION 1
+setenv OLLAMA_KV_CACHE_TYPE q8_0
+setenv OLLAMA_KEEP_ALIVE 30m
+setenv OLLAMA_API_BASE "http://$OLLAMA_HOST"
+ENV
+  echo "   wrote $PREFIX/ollama-env.sh and $PREFIX/ollama-env.csh"
 
   # Optional user-level unit, for when you'd rather not babysit nohup.
   mkdir -p "$HOME/.config/systemd/user"
@@ -259,7 +269,7 @@ print('   --- %d tokens, %.1f tok/s ---' % (ec, ec/(ed/1e9)))" \
   command -v nvidia-smi >/dev/null && \
     nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader | sed 's/^/   VRAM /'
   echo
-  echo "   next:  . $PREFIX/ollama-env.sh"
+  echo "   next:  source $PREFIX/ollama-env.csh   (tcsh)"
   echo "          cd <your repo> && aider"
 }
 

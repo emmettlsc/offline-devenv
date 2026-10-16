@@ -206,10 +206,15 @@ export PATH="$PREFIX/bin:$PREFIX/go/bin:\$HOME/go/bin:\$PATH"
 # 'go build' then sees only a warm GOMODCACHE or a vendored tree.
 export GOPROXY=off
 ENV
-  echo "   wrote $PREFIX/env.sh"
-  grep -q "$PREFIX/env.sh" "$HOME/.bashrc" 2>/dev/null \
-    && echo "   already sourced from ~/.bashrc" \
-    || echo "   add to ~/.bashrc:   . $PREFIX/env.sh"
+  # tcsh cannot parse POSIX sh, so emit a csh variant of the same settings.
+  cat > "$PREFIX/env.csh" <<ENV
+# source this from ~/.cshrc
+setenv PATH "$PREFIX/bin:$PREFIX/go/bin:\${HOME}/go/bin:\${PATH}"
+setenv GOPROXY off
+ENV
+  echo "   wrote $PREFIX/env.sh and $PREFIX/env.csh"
+  echo "   bash/zsh:  . $PREFIX/env.sh"
+  echo "   tcsh/csh:  source $PREFIX/env.csh"
 }
 
 # ----------------------------------------------------------------- verify ---
