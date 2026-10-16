@@ -44,6 +44,14 @@ add_rc() { # add_rc <rcfile> <needle> <line>
   fi
 }
 
+show_rev() {
+  if [ -f "$HERE/BUNDLE_REV" ]; then
+    printf '\033[2mbundle rev: %s\033[0m\n' "$(cat "$HERE/BUNDLE_REV")"
+  else
+    printf '\033[33mbundle rev: unknown (pre-dates stamping - this bundle may be stale)\033[0m\n'
+  fi
+}
+
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m!! %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31mxx %s\033[0m\n' "$*" >&2; exit 1; }
@@ -381,6 +389,8 @@ print('   --- %d tokens, %.1f tok/s ---' % (ec, ec/(ed/1e9)))" \
   echo "   next:  source $PREFIX/ollama-env.csh   (tcsh)"
   echo "          cd <your repo> && aider"
 }
+
+show_rev
 
 case "${1:-all}" in
   all)     preflight; install_ollama; write_env; serve; import_models; install_aider; verify ;;

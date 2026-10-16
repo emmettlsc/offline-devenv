@@ -75,6 +75,16 @@ MODELS=(
 )
 
 # ------------------------------------------------------------- helpers ------
+# Stamp the bundle with the commit it was built from. The installers print
+# this, so "is the target running the current script?" is answerable without
+# diffing files across an air gap.
+stamp_rev() { # stamp_rev <dir>
+  local d="$(dirname "$0")" rev
+  rev="$(git -C "$d" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  printf '%s %s\n' "$rev" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$1/BUNDLE_REV"
+  echo "   bundle rev: $rev"
+}
+
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m!! %s\033[0m\n' "$*" >&2; }
 
@@ -313,6 +323,7 @@ fetch_emacs() {
   fi
 
   # The target-side installer travels inside the bundle.
+  stamp_rev "$D"
   for s in install-target.sh build-grammars.sh; do
     [ -f "$(dirname "$0")/$s" ] && cp "$(dirname "$0")/$s" "$D/$s"
   done
@@ -353,6 +364,7 @@ fetch_model_common() {
   else warn "NO aider wheel resolved - check the pip output above"; fi
 
   fetch_tiktoken
+  stamp_rev "$D"
 
   # The target-side installer rides along inside the bundle it installs.
   [ -f "$(dirname "$0")/install-model.sh" ] && cp "$(dirname "$0")/install-model.sh" "$D/"

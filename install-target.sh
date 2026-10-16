@@ -47,6 +47,14 @@ add_rc() { # add_rc <rcfile> <needle> <line>
   fi
 }
 
+show_rev() {
+  if [ -f "$HERE/BUNDLE_REV" ]; then
+    printf '\033[2mbundle rev: %s\033[0m\n' "$(cat "$HERE/BUNDLE_REV")"
+  else
+    printf '\033[33mbundle rev: unknown (pre-dates stamping - this bundle may be stale)\033[0m\n'
+  fi
+}
+
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m!! %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31mxx %s\033[0m\n' "$*" >&2; exit 1; }
@@ -327,6 +335,8 @@ verify() {
   echo
   echo "next:  source $PREFIX/env.csh && emacs"
 }
+
+show_rev
 
 case "${1:-all}" in
   all)      preflight; build_tree_sitter; build_emacs; build_grammars
