@@ -199,8 +199,8 @@ install_tools() {
       || warn "venv creation failed (python3.11 may lack ensurepip)"
     if [ -x "$PREFIX/venv-lsp/bin/pip" ]; then
       "$PREFIX/venv-lsp/bin/pip" install -q --no-index \
-        --find-links "$HERE/wheels-lsp" python-lsp-server ruff \
-        && for b in pylsp ruff; do
+        --find-links "$HERE/wheels-lsp" python-lsp-server ruff compiledb \
+        && for b in pylsp ruff compiledb; do
              [ -x "$PREFIX/venv-lsp/bin/$b" ] && ln -sfn "$PREFIX/venv-lsp/bin/$b" "$PREFIX/bin/$b"
            done \
         && echo "   pylsp + ruff linked into $PREFIX/bin" \

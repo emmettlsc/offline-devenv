@@ -206,7 +206,10 @@ fetch_emacs() {
 
   say "python language server wheels"
   mkdir -p "$D/wheels-lsp"
-  pipdl "$D/wheels-lsp" python-lsp-server ruff || warn "python LSP wheels incomplete"
+  # compiledb turns a make build (or its dry run) into the
+  # compile_commands.json clangd needs. Pure python, so it bundles trivially.
+  pipdl "$D/wheels-lsp" python-lsp-server ruff compiledb \
+    || warn "python LSP wheels incomplete"
 
   # Sync the editor config rather than trusting whatever clone is lying
   # around: a stale dotfiles/ here is invisible until the target is already
