@@ -27,6 +27,8 @@ TREE_SITTER_VER=0.25.3         # any 0.25.x is fine (Emacs 30 takes ABI 13-15)
 GO_VER=1.27.2                  # gopls@latest needs >= 1.27 to build; keep
                                # the shipped toolchain >= that
 DOTFILES_REPO="${DOTFILES_REPO:-https://github.com/emmettlsc/dotfiles.git}"
+AIDER_MIN=0.86                 # floor: a resolver dead-end must error,
+                               # never quietly downgrade
 OLLAMA_VER=v0.40.5             # asset NAMES and FORMAT change between releases
 CLANGD_VER=23.1.0              # needs only GLIBC_2.18; static libstdc++
 SHELLCHECK_VER=v0.11.0         # fully static
@@ -128,12 +130,22 @@ fetch_norm() { # fetch_norm <url> <download-path> <final.tar.gz>
   if to_targz "$2" "$3"; then rm -f "$2"; fi
 }
 
+# RHEL 8.10 is glibc 2.28, so it runs manylinux_2_28 wheels as well as the
+# older manylinux2014 (= 2.17) ones. Asking for 2014 ALONE makes pip reject
+# every 2_28-only wheel -- pillow among them -- and then silently BACKTRACK
+# the whole resolution to a release old enough to predate that dependency.
+# That is how this produced aider 0.28 (April 2024) instead of 0.86. Offer
+# both tags.
+PIP_PLATFORMS=(--platform manylinux_2_28_x86_64 --platform manylinux2014_x86_64)
+
 # Prefer wheels tagged for the TARGET (cp311/manylinux), not this host.
 pipdl() { # pipdl <destdir> <pkgs...>
   local dest="$1"; shift
+  # stderr is NOT discarded: hiding it is what made the silent downgrade
+  # above invisible for weeks.
   python3 -m pip download -q -d "$dest" \
-      --only-binary=:all: --platform manylinux2014_x86_64 \
-      --python-version 3.11 --implementation cp --abi cp311 "$@" 2>/dev/null \
+      --only-binary=:all: "${PIP_PLATFORMS[@]}" \
+      --python-version 3.11 --implementation cp --abi cp311 "$@" \
     && { echo "   ok (cp311/manylinux wheels)"; return 0; }
   warn "strict cp311 download failed for: $*  - retrying natively"
   warn "  (if this bastion is not py3.11/x86_64 linux, those may not install)"
@@ -271,7 +283,12 @@ fetch_model_common() {
 
   say "aider wheels"
   mkdir -p "$D/wheels-aider"
-  pipdl "$D/wheels-aider" aider-chat || warn "aider wheels incomplete"
+  # The floor is load-bearing: without it a resolver dead-end downgrades
+  # instead of failing, and you only notice from a stale UI much later.
+  pipdl "$D/wheels-aider" "aider-chat>=$AIDER_MIN" || warn "aider wheels incomplete"
+  local got; got="$(ls "$D/wheels-aider"/aider_chat-*.whl 2>/dev/null | head -1)"
+  if [ -n "$got" ]; then echo "   resolved: $(basename "$got")"
+  else warn "NO aider wheel resolved - check the pip output above"; fi
 
   fetch_tiktoken
 
