@@ -140,44 +140,50 @@ fetch_norm() { # fetch_norm <url> <download-path> <final.tar.gz>
   if to_targz "$2" "$3"; then rm -f "$2"; fi
 }
 
-# Wheel downloading is the most failure-prone step here, so it picks a mode
-# explicitly and says which.
+# Wheel downloading is the most failure-prone step here. The rule, established
+# by testing every combination inside a real RHEL 8.10 x86_64 container:
 #
-# The target is linux x86_64, glibc 2.28, python 3.11. When THIS host is
-# linux x86_64 with glibc no newer than that, its own tag list is already
-# correct for the target -- including manylinux_2_28 and everything below --
-# so no --platform flag is needed, and only the python version has to be
-# retargeted. This is the path that works on an old pip.
+#   The fetch host's python must BE 3.11, the same as the target.
 #
-# --platform is only needed on a foreign host (a mac) or one with newer
-# glibc, and then BOTH manylinux tags must be offered: manylinux2014 alone
-# rejects the 2_28-only wheels (pillow) and makes pip backtrack the whole
-# resolution to a 2024 release, while 2_28 alone fails outright because pip
-# does not expand tags downward. Repeating --platform needs pip >= 22 -- and
-# pip 21 accepts the duplicate flag SILENTLY, honouring only the last, which
-# reintroduces the downgrade with no error. Hence the explicit version gate.
+# Retargeting with --python-version does NOT work for aider's dependency set
+# at ANY pip version -- 21.3.1, 22.3.1 and 24.2 all fail identically with
+# "Cannot install aider-chat==0.86.0 and aider-chat==0.86.1 ...
+# ResolutionImpossible", because markers are evaluated against the running
+# interpreter. With python 3.11 running, no retargeting is needed and it
+# resolves cleanly.
+#
+# --platform is then needed only when the host OS/arch differs from the
+# target. On linux x86_64 with glibc <= 2.28 the host's own tags are already
+# right (they include manylinux_2_28 and everything below). On a foreign host
+# BOTH manylinux tags must be named -- 2014 alone backtracks to a 2024 aider,
+# 2_28 alone fails since pip does not expand tags downward -- and repeating
+# --platform needs pip >= 22 (pip 21 honours only the last, silently).
 TARGET_GLIBC=2.28
 TARGET_PY=3.11
 
 PY_BIN="${PY_BIN:-}"
 pick_python() {
-  local c
+  local c v
   for c in python3.11 python3; do
-    command -v "$c" >/dev/null 2>&1 && { PY_BIN="$c"; return 0; }
+    command -v "$c" >/dev/null 2>&1 || continue
+    v="$("$c" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null)"
+    [ "$v" = "$TARGET_PY" ] && { PY_BIN="$c"; return 0; }
   done
-  warn "no python3 on this host - cannot fetch wheels"; return 1
+  warn "no python $TARGET_PY on this host (found: $(command -v python3 >/dev/null && python3 -V 2>&1 || echo none))."
+  warn "  The wheels must be resolved by a python $TARGET_PY interpreter; asking an"
+  warn "  older one to retarget fails with ResolutionImpossible at every pip version."
+  warn "  On RHEL 8:   sudo dnf install -y python3.11 python3.11-pip"
+  warn "  then re-run. Override with PY_BIN=/path/to/python3.11 if it is elsewhere."
+  return 1
 }
 
 ver_le() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
 host_glibc() { ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | tail -1; }
-host_py()    { "$PY_BIN" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null; }
 
-# True when this host's own wheel tags are valid for the target.
 host_tags_ok_for_target() {
   [ "$(uname -s)" = Linux ] || return 1
   [ "$(uname -m)" = x86_64 ] || return 1
-  local g; g="$(host_glibc)"
-  [ -n "$g" ] || return 1
+  local g; g="$(host_glibc)"; [ -n "$g" ] || return 1
   ver_le "$g" "$TARGET_GLIBC"
 }
 
@@ -187,38 +193,26 @@ pipdl() { # pipdl <destdir> <pkgs...>
   local dest="$1"; shift
   [ -n "$PY_BIN" ] || pick_python || return 1
   # Start clean: a dir left by a failed resolution holds several candidate
-  # versions and a partial dependency set, which fails later on the target as
-  # "cannot install aider-chat==0.86.0 and ==0.86.1".
+  # versions and a partial dependency set.
   rm -rf "$dest"; mkdir -p "$dest"
 
-  local py; py="$(host_py)"
   if host_tags_ok_for_target; then
-    if [ "$py" = "$TARGET_PY" ]; then
-      echo "   native mode (linux x86_64, glibc $(host_glibc), py $py == target)"
-      "$PY_BIN" -m pip download -q -d "$dest" --only-binary=:all: "$@" && return 0
-    else
-      echo "   host-tag mode (linux x86_64, glibc $(host_glibc); retargeting py $py -> $TARGET_PY)"
-      "$PY_BIN" -m pip download -q -d "$dest" --only-binary=:all: \
-          --python-version "$TARGET_PY" --implementation cp --abi "cp${TARGET_PY/./}" "$@" \
-        && return 0
-    fi
+    echo "   native mode (py $TARGET_PY, linux x86_64, glibc $(host_glibc))"
+    "$PY_BIN" -m pip download -q -d "$dest" --only-binary=:all: "$@" && return 0
     warn "wheel download failed for: $*"
     return 1
   fi
 
-  echo "   cross mode (this host is not linux/x86_64/glibc<=$TARGET_GLIBC)"
+  echo "   cross mode (host is not linux/x86_64/glibc<=$TARGET_GLIBC)"
   local pm; pm="$(pip_major)"
   if [ -z "$pm" ] || [ "$pm" -lt 22 ]; then
     warn "pip $("$PY_BIN" -m pip --version 2>/dev/null | awk '{print $2}') cannot be trusted with repeated"
     warn "  --platform (needs >= 22; pip 21 honours only the last, silently)."
-    warn "  Either:  $PY_BIN -m pip install --user --upgrade pip"
-    warn "  or run this on a linux x86_64 host with glibc <= $TARGET_GLIBC,"
-    warn "  where no --platform flag is needed at all."
+    warn "  Run:  $PY_BIN -m pip install --user --upgrade pip"
     return 1
   fi
   "$PY_BIN" -m pip download -q -d "$dest" --only-binary=:all: \
-      --platform manylinux_2_28_x86_64 --platform manylinux2014_x86_64 \
-      --python-version "$TARGET_PY" --implementation cp --abi "cp${TARGET_PY/./}" "$@" \
+      --platform manylinux_2_28_x86_64 --platform manylinux2014_x86_64 "$@" \
     && return 0
   warn "wheel download failed for: $*"
   return 1
